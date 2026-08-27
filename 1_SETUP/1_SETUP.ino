@@ -8,10 +8,10 @@
 #include <Adafruit_TCS34725.h>
 
 // ========================================================
-// PARÂMETROS DE THRESHOLD E CALIBRAÇÃO 
+// PARÂMETROS DE THRESHOLD E CALIBRAÇÃO
 // ========================================================
-const uint16_t QTR_TH_PRETO = 700;       // Valor do QTR para considerar fita/ar (>)
-const uint16_t QTR_TH_LINHA = 200;       // Valor do QTR para considerar linha central (>)
+const uint16_t QTR_TH_PRETO = 700;  // Valor do QTR para considerar fita/ar (>)
+const uint16_t QTR_TH_LINHA = 200;  // Valor do QTR para considerar linha central (>)
 
 // Thresholds de cor e altura do TCS
 const uint16_t TCS_CLEAR_MIN = 400;      // Intensidade (C) mínima: abaixo disso é ar/redutor
@@ -19,6 +19,9 @@ const uint16_t TCS_CLEAR_MAX = 3200;     // Intensidade (C) máxima: acima disso
 const float TCS_FATOR_VERDE_R = 1.30;    // G precisa ser 30% maior que R
 const float TCS_FATOR_VERDE_B = 1.20;    // G precisa ser 20% maior que B
 const uint16_t TCS_VERDE_G_MINIMO = 90;  // Valor absoluto mínimo do canal G para ser verde
+const float TCS_FATOR_VERMELHO_G = 1.40;  
+const float TCS_FATOR_VERMELHO_B = 1.30; 
+const uint16_t TCS_VERMELHO_R_MINIMO = 90;
 
 // ========================================================
 // DEFINIÇÕES DE PINOS MOTORES
@@ -189,7 +192,7 @@ int compensarZonaMorta(int vel) {
 void seguirLinhaPID() {
   uint16_t position = qtr.readLineBlack(sensorValues);
 
-  // 
+
   // Conta quantos sensores estão lendo preto ao mesmo tempo
   uint8_t contagemPreto = 0;
   for (uint8_t i = 0; i < SensorCount; i++) {
@@ -203,14 +206,14 @@ void seguirLinhaPID() {
     escreverDisplay("Redutor!");
     controlarMotoresPID(velocidadeBase + 30, velocidadeBase + 30);
     escreverDisplay("avanca");
-    moverCentimetros(velocidadeBase, 2);
+    controlarMotoresPID(velocidadeBase + 30, velocidadeBase + 30);
     escreverDisplay("consegui");
     controlarMotoresPID(velocidadeBase + 30, velocidadeBase + 30);
     delay(250);
-    return; // Aborta cruzamento e empurra o robô para subir
+    return;  // Aborta cruzamento e empurra o robô para subir
   }
 
-  // 2. VERIFICAÇÃO DE CRUZAMENTO REAL
+  // 2. VERIFICAÇÃO DE CRUZAMENTO
   bool marcaEsq = (sensorValues[0] > QTR_TH_PRETO);
   bool marcaDir = (sensorValues[5] > QTR_TH_PRETO);
 
@@ -219,7 +222,7 @@ void seguirLinhaPID() {
     parar(0);
     delay(30);
 
-    checarQuadradosVerdes();
+    checarQuadradosVerdes();  // verifica qual lado viu verde
 
     if (viuVerdeEsq && viuVerdeDir) {
       escreverDisplay("180 Graus");
@@ -243,7 +246,7 @@ void seguirLinhaPID() {
       moverCentimetros(velocidadeBase, 0.7);
       qtr.readLineBlack(sensorValues);
 
-      bool linhaContinua = (sensorValues[2] > QTR_TH_LINHA || sensorValues[3] > QTR_TH_LINHA);
+      bool linhaContinua = (sensorValues[2] > QTR_TH_LINHA || sensorValues[3] > QTR_TH_LINHA);  // Avança a linha e procura se é um cruzamento
 
       if (linhaContinua) {
         escreverDisplay("Cruzamento Reto");
@@ -275,7 +278,30 @@ void seguirLinhaPID() {
     }
   }
 
-  if (perdeuLinha) {
+  if (perdeuLinha) { // Ve se não parou por conta do vermelho
+    uint16_t r, g, b, c;
+    tcaselect(0);
+    tcsEsq.getRawData(&r, &g, &b, &c);
+    bool noChaoEsq = (c >= TCS_CLEAR_MIN && c <= TCS_CLEAR_MAX);
+    bool eVermelhoEsq = noChaoEsq && (r >= TCS_VERMELHO_R_MINIMO) && (r > g * TCS_FATOR_VERMELHO_G) && (r > b * TCS_FATOR_VERMELHO_B);
+
+    tcaselect(1);
+    tcsDir.getRawData(&r, &g, &b, &c);
+    bool noChaoDir = (c >= TCS_CLEAR_MIN && c <= TCS_CLEAR_MAX);
+    bool eVermelhoDir = noChaoDir && (r >= TCS_VERMELHO_R_MINIMO) && (r > g * TCS_FATOR_VERMELHO_G) && (r > b * TCS_FATOR_VERMELHO_B);
+
+    // Se qualquer um dos lados vir vermelho (ou exigir os dois, dependendo da pista)
+    if (eVermelhoEsq || eVermelhoDir) {
+      escreverDisplay("FIM DE PISTA!");
+      parar(0);
+      while (true) {
+        // Trava o robô num loop infinito no final da pista
+        digitalWrite(PINO_LED, HIGH);
+        delay(500);
+        digitalWrite(PINO_LED, LOW);
+        delay(500);
+      }
+    }
     if (abs(erroAnterior) < 1000) {
       controlarMotoresPID(velocidadeBase, velocidadeBase);
       return;
@@ -336,7 +362,7 @@ void virarGraus(int vel, float graus) {
 
   // 1. Calcula quantas voltas a roda/esteira precisa dar para aquele ângulo
   float voltasRoda = (DISTANCIA_ENTRE_RODAS * grausAbs) / (360.0 * DIAMETRO_RODA);
-  
+
   // 2. Converte as voltas em pulsos do encoder
   long pulsosAlvo = voltasRoda * PULSOS_POR_VOLTA;
 
@@ -346,11 +372,11 @@ void virarGraus(int vel, float graus) {
   interrupts();
 
   // 4. Aciona os motores em sentidos opostos (Giro no próprio eixo)
-  if (graus > 0) { 
+  if (graus > 0) {
     // Virar para a DIREITA (Esteira esq frente, esteira dir trás)
     motor_esq(vel);
     motor_dirTras(vel);
-  } else { 
+  } else {
     // Virar para a ESQUERDA (Esteira esq trás, esteira dir frente)
     motor_esqTras(vel);
     motor_dir(vel);
@@ -467,18 +493,14 @@ void checarQuadradosVerdes() {
   tcaselect(0);
   tcsEsq.getRawData(&r, &g, &b, &c);
   bool noChaoEsq = (c >= TCS_CLEAR_MIN && c <= TCS_CLEAR_MAX);
-  bool eVerdeEsq = (g >= TCS_VERDE_G_MINIMO) && 
-                   (g > r * TCS_FATOR_VERDE_R) && 
-                   (g > b * TCS_FATOR_VERDE_B);
+  bool eVerdeEsq = (g >= TCS_VERDE_G_MINIMO) && (g > r * TCS_FATOR_VERDE_R) && (g > b * TCS_FATOR_VERDE_B);
   viuVerdeEsq = (noChaoEsq && eVerdeEsq);
 
   // DIREITO (Porta 1)
   tcaselect(1);
   tcsDir.getRawData(&r, &g, &b, &c);
   bool noChaoDir = (c >= TCS_CLEAR_MIN && c <= TCS_CLEAR_MAX);
-  bool eVerdeDir = (g >= TCS_VERDE_G_MINIMO) && 
-                   (g > r * TCS_FATOR_VERDE_R) && 
-                   (g > b * TCS_FATOR_VERDE_B);
+  bool eVerdeDir = (g >= TCS_VERDE_G_MINIMO) && (g > r * TCS_FATOR_VERDE_R) && (g > b * TCS_FATOR_VERDE_B);
   viuVerdeDir = (noChaoDir && eVerdeDir);
 }
 
@@ -489,24 +511,22 @@ void testarVerdeDebug() {
 
   tcaselect(0);
   tcsEsq.getRawData(&rEsq, &gEsq, &bEsq, &cEsq);
-  bool vEsq = (cEsq >= TCS_CLEAR_MIN && cEsq <= TCS_CLEAR_MAX) &&
-              (gEsq >= TCS_VERDE_G_MINIMO) &&
-              (gEsq > rEsq * TCS_FATOR_VERDE_R) && 
-              (gEsq > bEsq * TCS_FATOR_VERDE_B);
+  bool vEsq = (cEsq >= TCS_CLEAR_MIN && cEsq <= TCS_CLEAR_MAX) && (gEsq >= TCS_VERDE_G_MINIMO) && (gEsq > rEsq * TCS_FATOR_VERDE_R) && (gEsq > bEsq * TCS_FATOR_VERDE_B);
 
   tcaselect(1);
   tcsDir.getRawData(&rDir, &gDir, &bDir, &cDir);
-  bool vDir = (cDir >= TCS_CLEAR_MIN && cDir <= TCS_CLEAR_MAX) &&
-              (gDir >= TCS_VERDE_G_MINIMO) &&
-              (gDir > rDir * TCS_FATOR_VERDE_R) && 
-              (gDir > bDir * TCS_FATOR_VERDE_B);
+  bool vDir = (cDir >= TCS_CLEAR_MIN && cDir <= TCS_CLEAR_MAX) && (gDir >= TCS_VERDE_G_MINIMO) && (gDir > rDir * TCS_FATOR_VERDE_R) && (gDir > bDir * TCS_FATOR_VERDE_B);
 
-  Serial.print("ESQ -> C:"); Serial.print(cEsq);
-  Serial.print(" G:"); Serial.print(gEsq);
+  Serial.print("ESQ -> C:");
+  Serial.print(cEsq);
+  Serial.print(" G:");
+  Serial.print(gEsq);
   Serial.print(vEsq ? " [VERDE!]" : " [----]");
 
-  Serial.print(" | DIR -> C:"); Serial.print(cDir);
-  Serial.print(" G:"); Serial.print(gDir);
+  Serial.print(" | DIR -> C:");
+  Serial.print(cDir);
+  Serial.print(" G:");
+  Serial.print(gDir);
   Serial.println(vDir ? " [VERDE!]" : " [----]");
 
   tcaselect(2);
@@ -515,8 +535,57 @@ void testarVerdeDebug() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0, 0);
   display.println("--- DEBUG TCS ---");
-  display.print("Esq C="); display.print(cEsq); display.println(vEsq ? " VERDE" : " ---");
-  display.print("Dir C="); display.print(cDir); display.println(vDir ? " VERDE" : " ---");
+  display.print("Esq C=");
+  display.print(cEsq);
+  display.println(vEsq ? " VERDE" : " ---");
+  display.print("Dir C=");
+  display.print(cDir);
+  display.println(vDir ? " VERDE" : " ---");
+  display.display();
+
+  delay(300);
+}
+
+void testarVermelhoDebug() {
+  parar(0);
+  uint16_t rEsq, gEsq, bEsq, cEsq;
+  uint16_t rDir, gDir, bDir, cDir;
+
+  // Lê sensor Esquerdo
+  tcaselect(0);
+  tcsEsq.getRawData(&rEsq, &gEsq, &bEsq, &cEsq);
+  bool vEsq = (cEsq >= TCS_CLEAR_MIN && cEsq <= TCS_CLEAR_MAX) && (rEsq >= TCS_VERMELHO_R_MINIMO) && (rEsq > gEsq * TCS_FATOR_VERMELHO_G) && (rEsq > bEsq * TCS_FATOR_VERMELHO_B);
+
+  // Lê sensor Direito
+  tcaselect(1);
+  tcsDir.getRawData(&rDir, &gDir, &bDir, &cDir);
+  bool vDir = (cDir >= TCS_CLEAR_MIN && cDir <= TCS_CLEAR_MAX) && (rDir >= TCS_VERMELHO_R_MINIMO) && (rDir > gDir * TCS_FATOR_VERMELHO_G) && (rDir > bDir * TCS_FATOR_VERMELHO_B);
+
+  Serial.print("ESQ -> C:");
+  Serial.print(cEsq);
+  Serial.print(" R:");
+  Serial.print(rEsq);
+  Serial.print(vEsq ? " [VERMELHO!]" : " [--------]");
+
+  Serial.print(" | DIR -> C:");
+  Serial.print(cDir);
+  Serial.print(" R:");
+  Serial.print(rDir);
+  Serial.println(vDir ? " [VERMELHO!]" : " [--------]");
+
+  // Mostra no display
+  tcaselect(2);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("--- DEBUG VERMELHO ---");
+  display.print("Esq R=");
+  display.print(rEsq);
+  display.println(vEsq ? " RED" : " ---");
+  display.print("Dir R=");
+  display.print(rDir);
+  display.println(vDir ? " RED" : " ---");
   display.display();
 
   delay(300);
