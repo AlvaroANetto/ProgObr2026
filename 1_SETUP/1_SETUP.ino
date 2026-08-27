@@ -10,7 +10,7 @@
 // ========================================================
 // PARÂMETROS DE THRESHOLD E CALIBRAÇÃO
 // ========================================================
-const uint16_t QTR_TH_PRETO = 700;  // Valor do QTR para considerar fita/ar (>)
+const uint16_t QTR_TH_PRETO = 650;  // Valor do QTR para considerar fita/ar (>)
 const uint16_t QTR_TH_LINHA = 200;  // Valor do QTR para considerar linha central (>)
 
 // Thresholds de cor e altura do TCS
@@ -19,8 +19,8 @@ const uint16_t TCS_CLEAR_MAX = 3200;     // Intensidade (C) máxima: acima disso
 const float TCS_FATOR_VERDE_R = 1.30;    // G precisa ser 30% maior que R
 const float TCS_FATOR_VERDE_B = 1.20;    // G precisa ser 20% maior que B
 const uint16_t TCS_VERDE_G_MINIMO = 90;  // Valor absoluto mínimo do canal G para ser verde
-const float TCS_FATOR_VERMELHO_G = 1.40;  
-const float TCS_FATOR_VERMELHO_B = 1.30; 
+const float TCS_FATOR_VERMELHO_G = 1.40;
+const float TCS_FATOR_VERMELHO_B = 1.30;
 const uint16_t TCS_VERMELHO_R_MINIMO = 90;
 
 // ========================================================
@@ -42,11 +42,18 @@ const uint16_t TCS_VERMELHO_R_MINIMO = 90;
 #define PINO_LED 13
 
 // ========================================================
+//  PINOS Ultrasônico
+// ========================================================
+
+#define trigger A12
+#define echo A11
+
+// ========================================================
 // VARIÁVEIS DO ENCODER
 // ========================================================
 #define DIAMETRO_RODA 3.0
 #define PULSOS_POR_VOLTA 226
-#define DISTANCIA_ENTRE_RODAS 15
+#define DISTANCIA_ENTRE_RODAS 19.5
 volatile long degraus;
 
 // ========================================================
@@ -121,6 +128,9 @@ void setup() {
   pinMode(ENB, OUTPUT);
   pinMode(PINO_LED, OUTPUT);
 
+  pinMode(trigger, OUTPUT);
+  pinMode(echo, INPUT);
+
   pinMode(EncoderAmarelo, INPUT_PULLUP);
   pinMode(EncoderAzul, INPUT_PULLUP);
   degraus = 0;
@@ -174,7 +184,7 @@ void setup() {
 // ========================================================
 void loop() {
   seguirLinhaPID();
-  // testarVerdeDebug();
+  //testarVerdeDebug();
   //virarDireita(120, 90);
   //delay(2000);
 }
@@ -190,6 +200,24 @@ int compensarZonaMorta(int vel) {
 // LÓGICA DO PID COM FILTRO DE REDUTOR
 // ========================================================
 void seguirLinhaPID() {
+
+  // ----------------------------------------------------
+  // CHECAGEM DE OBSTÁCULO (Executa a cada 60ms)
+  // ----------------------------------------------------
+  static unsigned long tempoUltimoUS = 0;
+  if (millis() - tempoUltimoUS > 60) {
+    tempoUltimoUS = millis();
+    float dist = lerDistanciaCM();
+
+    if (dist <= 10.0) {  // Obstáculo detectado a 10cm ou menos
+      escreverDisplay("OBSTACULO!");
+      parar(300);
+      desviarObstaculo();
+
+      return;
+    }
+  }
+  //
   uint16_t position = qtr.readLineBlack(sensorValues);
 
 
@@ -231,22 +259,20 @@ void seguirLinhaPID() {
       direitaAtePreto();
     } else if (viuVerdeEsq) {
       escreverDisplay("Verde Dir");
-      moverCentimetros(120, 0);
-      parar(0);
-      virarDireita(120, 80);
+      virarDireita(120, 60);
       direitaAtePreto();
-      moverCentimetros(120, 3);
+      moverCentimetros(120, 4);
     } else if (viuVerdeDir) {
       escreverDisplay("Verde Esq");
-      moverCentimetros(120, 0);
-      virarEsquerda(120, 80);
+      moverCentimetros(120, 1.5);
+      virarEsquerda(120, 60);
       esquerdaAtePreto();
-      moverCentimetros(120, 3);
+      moverCentimetros(120, 4);
     } else {
-      moverCentimetros(velocidadeBase, 0.7);
+      moverCentimetros(velocidadeBase, 0.7);  // Avança a linha e procura se é um cruzamento
       qtr.readLineBlack(sensorValues);
 
-      bool linhaContinua = (sensorValues[2] > QTR_TH_LINHA || sensorValues[3] > QTR_TH_LINHA);  // Avança a linha e procura se é um cruzamento
+      bool linhaContinua = (sensorValues[2] > QTR_TH_LINHA || sensorValues[3] > QTR_TH_LINHA);
 
       if (linhaContinua) {
         escreverDisplay("Cruzamento Reto");
@@ -278,7 +304,7 @@ void seguirLinhaPID() {
     }
   }
 
-  if (perdeuLinha) { // Ve se não parou por conta do vermelho
+  if (perdeuLinha) {  // Ve se não parou por conta do vermelho
     uint16_t r, g, b, c;
     tcaselect(0);
     tcsEsq.getRawData(&r, &g, &b, &c);
@@ -481,6 +507,116 @@ void moverCentimetros(int vel, float distancia_cm) {
   float voltas = distancia_cm / circunferencia;
   long pulsos_alvo = voltas * PULSOS_POR_VOLTA;
   moverDist(vel, pulsos_alvo);
+}
+
+void frenteAtePreto(int vel) {
+  qtr.readLineBlack(sensorValues);
+
+  // Enquanto nenhum dos 6 sensores encontrar a linha preta:
+  while (sensorValues[0] <= QTR_TH_LINHA && sensorValues[1] <= QTR_TH_LINHA && sensorValues[2] <= QTR_TH_LINHA && sensorValues[3] <= QTR_TH_LINHA && sensorValues[4] <= QTR_TH_LINHA && sensorValues[5] <= QTR_TH_LINHA) {
+    motor_frente(vel);
+    qtr.readLineBlack(sensorValues);
+  }
+
+  parar(0);  // Para assim que cruzar a fita
+}
+// ========================================================
+// Obstaculo
+// ========================================================
+
+void desviarObstaculo() {
+  escreverDisplay("Desviando");
+  moverCentimetros(100, -3.0);
+  parar(200);
+
+  // 1. Vira 90° para a direita e se afasta da linha
+  virarDireita(120, 90);
+  parar(200);
+  moverCentimetros(120, 27.0);
+  parar(200);
+
+  // 2. Vira 90° à esquerda (fica paralelo ao obstáculo)
+  virarEsquerda(120, 82);
+  parar(200);
+
+  // --- ETAPA 1: Procura linha na DIREITA ---
+  bool achouNaDireita = moverAteLinhaOuDistancia(100, 35.0);
+  if (achouNaDireita) {
+    escreverDisplay("Linha na Dir!");
+    moverCentimetros(100, 3.0);
+    virarDireita(120, 45);
+    direitaAtePreto();
+    return; // Linha encontrada, encerra o desvio
+  }
+
+  // --- ETAPA 2: Procura LINHA RETA ---
+  virarEsquerda(120, 90); // Vira em direção ao centro da pista
+  parar(200);
+
+  // Anda ~25cm cruzando o centro onde a reta deveria estar
+  bool achouReta = moverAteLinhaOuDistancia(100, 25.0);
+  if (achouReta) {
+    escreverDisplay("Linha Reta!");
+    moverCentimetros(100, 3.0);
+    virarDireita(120, 45);
+    direitaAtePreto();
+    return; // Linha encontrada, encerra o desvio
+  }
+
+  // --- ETAPA 3: Procura linha na ESQUERDA ---
+  // Se passou pelo centro e não achou nada, a linha dobrou para a esquerda!
+  escreverDisplay("Linha na Esq!");
+  virarEsquerda(120, 90); // Vira para trás (paralelo à curva da esquerda)
+  parar(200);
+
+  frenteAtePreto(100); // Anda até encontrar a fita
+  moverCentimetros(100, 3.0);
+  virarDireita(120, 45);
+  direitaAtePreto();
+}
+
+// ========================================================
+// LEITURA DO ULTRASSÔNICO
+// ========================================================
+float lerDistanciaCM() {
+  digitalWrite(trigger, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigger, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigger, LOW);
+
+  // pulseIn com timeout de 10.000 microssegundos (~1.7 metros)
+  long duracao = pulseIn(echo, HIGH, 10000);
+
+  if (duracao == 0) {
+    return 999.0;  // Sem obstáculo no alcance seguro
+  }
+
+  return (duracao * 0.0343) / 2.0;
+}
+
+
+bool moverAteLinhaOuDistancia(int vel, float cm) {
+  float circunferencia = DIAMETRO_RODA * 3.14159;
+  float voltas = cm / circunferencia;
+  long pulsosAlvo = abs(voltas * PULSOS_POR_VOLTA);
+  degraus = 0;
+  
+
+  if (cm < 0) motor_tras(vel);
+  else motor_frente(vel);
+
+  while (abs(lerDegraus()) < pulsosAlvo) {
+    qtr.readLineBlack(sensorValues);
+    // Se qualquer um dos sensores centrais ou laterais detectar a linha
+    if (sensorValues[1] > QTR_TH_LINHA || sensorValues[2] > QTR_TH_LINHA || 
+        sensorValues[3] > QTR_TH_LINHA || sensorValues[4] > QTR_TH_LINHA) {
+      parar(0);
+      return true; // Achou a linha antes do limite!
+    }
+  }
+  parar(0);
+  return false; // Chegou ao fim da distância sem achar linha
 }
 
 // =======================================================
