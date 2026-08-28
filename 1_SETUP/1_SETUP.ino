@@ -6,6 +6,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_TCS34725.h>
+#include <MPU6050_light.h>
+#include <Adafruit_VL53L0X.h>
 
 // ========================================================
 // PARÂMETROS DE THRESHOLD E CALIBRAÇÃO
@@ -94,12 +96,20 @@ Adafruit_SSD1306 display(largura_display, altura_display, &Wire, oled_reset);
 Adafruit_TCS34725 tcsEsq = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 Adafruit_TCS34725 tcsDir = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_4X);
 
+// Giro
+MPU6050 mpu(Wire);
+
+// Infra
+Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+
+#define CANAL_GIROSCOPIO 7
 void tcaselect(uint8_t i) {
   if (i > 7) return;
   Wire.beginTransmission(TCAADDR);
   Wire.write(1 << i);
   Wire.endTransmission();
 }
+
 
 // ========================================================
 // SETUP
@@ -119,6 +129,17 @@ void setup() {
 
   tcaselect(1);
   if (!tcsDir.begin()) Serial.println("Erro TCS Direito!");
+
+  tcaselect(CANAL_GIROSCOPIO);
+  mpu.begin();
+  mpu.calcOffsets();
+
+  tcaselect(6);
+  if (!lox.begin()) {
+    Serial.println(F("Erro no VL53L0X lateral!"));
+  } else {
+    Serial.println(F("VL53L0X iniciado."));
+  }
 
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
@@ -186,6 +207,7 @@ void loop() {
   seguirLinhaPID();
   //testarVerdeDebug();
   //virarDireita(120, 90);
+  //girarGraus(120, 90, 'D');
   //delay(2000);
 }
 
@@ -383,6 +405,43 @@ long lerDegraus() {
   return contagemSegura;
 }
 
+void girarGraus(int forca, float grausAlvo, char direcao) {
+  tcaselect(CANAL_GIROSCOPIO);
+  mpu.update();
+
+  float anguloInicial = mpu.getAngleZ();
+  float diferenca = 0;
+
+  // 1. Compensação de Inércia
+  float inercia = 5.0;
+  float alvoReal = grausAlvo - inercia;
+
+  if (alvoReal < 0) alvoReal = 1.0;  // Prevenção de segurança
+
+  // Aciona os motores
+  if (direcao == 'D' || direcao == 'd') {
+    motor_esqTras(forca);
+    motor_dir(forca);
+  } else if (direcao == 'E' || direcao == 'e') {
+    motor_esq(forca);
+    motor_dirTras(forca);
+  }
+
+  // Fica preso no while enquanto a diferença for menor que o alvo
+  while (diferenca < alvoReal) {
+    tcaselect(CANAL_GIROSCOPIO);
+    mpu.update();  // Atualiza a leitura
+
+    diferenca = abs(mpu.getAngleZ() - anguloInicial);
+
+    // 2. Filtro anti-ruído:
+    // Um micro-respiro para o Multiplexador e o Sensor não travarem
+    delay(2);
+  }
+
+  parar(200);  // Freia os motores
+}
+
 void virarGraus(int vel, float graus) {
   float grausAbs = abs(graus);
 
@@ -525,54 +584,109 @@ void frenteAtePreto(int vel) {
 // ========================================================
 
 void desviarObstaculo() {
-  escreverDisplay("Desviando");
-  moverCentimetros(100, -3.0);
+  escreverDisplay("Desviando...");
+
+  // 1. Vira 90° para a DIREITA
+  girarGraus(120, 90.0, 'D');
   parar(200);
 
-  // 1. Vira 90° para a direita e se afasta da linha
-  virarDireita(120, 90);
-  parar(200);
-  moverCentimetros(120, 27.0);
-  parar(200);
+  // 2. Liga os motores para ir para frente
+  motor_frente(100);
 
-  // 2. Vira 90° à esquerda (fica paralelo ao obstáculo)
-  virarEsquerda(120, 82);
-  parar(200);
-
-  // --- ETAPA 1: Procura linha na DIREITA ---
-  bool achouNaDireita = moverAteLinhaOuDistancia(100, 35.0);
-  if (achouNaDireita) {
-    escreverDisplay("Linha na Dir!");
-    moverCentimetros(100, 3.0);
-    virarDireita(120, 45);
-    direitaAtePreto();
-    return; // Linha encontrada, encerra o desvio
+  // 3. ETAPA A: "PROCURAR A CAIXA"
+  long tempoSeguranca = millis();
+  while (lerDistanciaLateral() > 250) {
+    if (millis() - tempoSeguranca > 2500) break;
+    delay(10);
   }
 
-  // --- ETAPA 2: Procura LINHA RETA ---
-  virarEsquerda(120, 90); // Vira em direção ao centro da pista
+  motor_frente(100);
+  delay(300);
   parar(200);
 
-  // Anda ~25cm cruzando o centro onde a reta deveria estar
-  bool achouReta = moverAteLinhaOuDistancia(100, 25.0);
+  motor_frente(100);
+
+  // 4. ETAPA B: "ACOMPANHAR A CAIXA"
+  while (lerDistanciaLateral() < 250) {
+    delay(10);
+  }
+
+  // 5. Saiu do loop! 
+  // CORREÇÃO: Trocado moverCentimetros por tempo para não travar
+  motor_frente(100);
+  delay(400); // Ajuste esse delay para simular os seus 7.5 cm antigos
+  parar(200);
+
+  // 6. Vira 90° para a ESQUERDA (Fica paralelo à linha original)
+  girarGraus(120, 90.0, 'E');
+  parar(200);
+  
+  // 7. Vai em direção à fita preta
+  bool achouReta = moverAteLinhaOuDistancia(100, 60.0);
+
   if (achouReta) {
-    escreverDisplay("Linha Reta!");
-    moverCentimetros(100, 3.0);
-    virarDireita(120, 45);
+    escreverDisplay("Linha Encontrada");
+
+    // CORREÇÃO: Trocado moverCentimetros por tempo
+    motor_frente(100);
+    delay(200); // Ajuste para simular os 3.0 cm
+    parar(100);
+
+    // Gira para a Esquerda para alinhar com a pista
+    girarGraus(120, 90.0, 'D');
+
+    // Trava o alinhamento
     direitaAtePreto();
-    return; // Linha encontrada, encerra o desvio
+    
+    // Ré de assentamento
+    motor_tras(100);
+    delay(300);
+    parar(100);
+    
+  } else {
+
+    // Tratamento caso a pista dobre durante o obstáculo (Dobrou para a Esquerda)
+    escreverDisplay("Pista dobrou!");
+    girarGraus(120, 90.0, 'E');
+    
+    bool linha2 = moverAteLinhaOuDistancia(100, 50.0);
+    
+    if (linha2) {
+      // === ELE ACHOU A LINHA 2! A AÇÃO ACONTECE AQUI DENTRO ===
+      escreverDisplay("Linha 2 Encontrada!");
+      
+      // Avança o eixo da roda (simulando os 3.0 cm)
+      motor_frente(100);
+      delay(200); 
+      parar(100);
+      
+      // Gira para a DIREITA para alinhar com a nova pista
+      girarGraus(120, 90.0, 'D'); 
+      
+      // Trava o alinhamento
+      direitaAtePreto();
+      
+      // Ré de assentamento
+      motor_tras(100);
+      delay(300);
+      parar(100);
+      
+    } else {
+      motor_frente(100);
+      delay(200); 
+      parar(0);
+      girarGraus(120, 90.0, 'E');
+      frenteAtePreto(120);
+      girarGraus(120, 90.0, 'D');
+
+      direitaAtePreto();
+      
+      // Ré de assentamento
+      motor_tras(100);
+      delay(300);
+      parar(100); 
+    }
   }
-
-  // --- ETAPA 3: Procura linha na ESQUERDA ---
-  // Se passou pelo centro e não achou nada, a linha dobrou para a esquerda!
-  escreverDisplay("Linha na Esq!");
-  virarEsquerda(120, 90); // Vira para trás (paralelo à curva da esquerda)
-  parar(200);
-
-  frenteAtePreto(100); // Anda até encontrar a fita
-  moverCentimetros(100, 3.0);
-  virarDireita(120, 45);
-  direitaAtePreto();
 }
 
 // ========================================================
@@ -601,7 +715,7 @@ bool moverAteLinhaOuDistancia(int vel, float cm) {
   float voltas = cm / circunferencia;
   long pulsosAlvo = abs(voltas * PULSOS_POR_VOLTA);
   degraus = 0;
-  
+
 
   if (cm < 0) motor_tras(vel);
   else motor_frente(vel);
@@ -609,14 +723,26 @@ bool moverAteLinhaOuDistancia(int vel, float cm) {
   while (abs(lerDegraus()) < pulsosAlvo) {
     qtr.readLineBlack(sensorValues);
     // Se qualquer um dos sensores centrais ou laterais detectar a linha
-    if (sensorValues[1] > QTR_TH_LINHA || sensorValues[2] > QTR_TH_LINHA || 
-        sensorValues[3] > QTR_TH_LINHA || sensorValues[4] > QTR_TH_LINHA) {
+    if (sensorValues[1] > QTR_TH_LINHA || sensorValues[2] > QTR_TH_LINHA || sensorValues[3] > QTR_TH_LINHA || sensorValues[4] > QTR_TH_LINHA) {
       parar(0);
-      return true; // Achou a linha antes do limite!
+      return true;  // Achou a linha antes do limite!
     }
   }
   parar(0);
-  return false; // Chegou ao fim da distância sem achar linha
+  return false;  // Chegou ao fim da distância sem achar linha
+}
+
+int lerDistanciaLateral() {
+  tcaselect(6);
+  VL53L0X_RangingMeasurementData_t measure;
+  lox.rangingTest(&measure, false);
+
+  // O RangeStatus 4 indica que o sensor não encontrou obstáculo dentro do limite
+  if (measure.RangeStatus != 4) {
+    return measure.RangeMilliMeter;  // Retorna em milímetros (ex: 150 = 15 cm)
+  } else {
+    return 9999;  // Vazio absoluto
+  }
 }
 
 // =======================================================
